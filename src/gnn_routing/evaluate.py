@@ -10,6 +10,10 @@ from tqdm import tqdm
 import time
 import json
 from typing import List, Tuple
+import wandb
+from datetime import datetime
+from dotenv import load_dotenv
+import os
 
 from gnn_routing.data import (
     SyntheticGraphGenerator,
@@ -351,16 +355,80 @@ def main():
         help="Maximum number of Topology Zoo networks to evaluate (None for all)",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument(
+        "--wandb_project",
+        type=str,
+        default=None,
+        help="W&B project name for evaluation (overrides env var WANDB_PROJECT)",
+    )
+    parser.add_argument(
+        "--wandb_run_name",
+        type=str,
+        default=None,
+        help="W&B run name (overrides auto-generated name)",
+    )
+    parser.add_argument(
+        "--wandb_mode",
+        type=str,
+        default="online",
+        choices=["online", "offline", "disabled"],
+        help="W&B logging mode",
+    )
+    parser.add_argument(
+        "--wandb_run_id",
+        type=str,
+        default=None,
+        help="W&B training run ID to link evaluation to (optional)",
+    )
 
     args = parser.parse_args()
+
+    # Load environment variables from .env file
+    load_dotenv()
 
     # Set random seeds
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
+    # Get wandb project name from env or args
+    wandb_project = args.wandb_project or os.getenv(
+        "WANDB_PROJECT", "gnn-network-routing-eval"
+    )
+
+    # Generate run name: project_name + serialized datetime
+    if args.wandb_run_name:
+        wandb_run_name = args.wandb_run_name
+    else:
+        dt_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        wandb_run_name = f"{wandb_project}_{dt_str}"
+
+    # Initialize wandb
+    wandb_config = {
+        "checkpoint": args.checkpoint,
+        "n_test_graphs": args.n_test_graphs,
+        "n_pairs_per_graph": args.n_pairs_per_graph,
+        "node_range": args.node_range,
+        "benchmark_dijkstra": args.benchmark_dijkstra,
+        "topology_zoo_dir": args.topology_zoo_dir,
+        "max_topology_zoo_networks": args.max_topology_zoo_networks,
+        "seed": args.seed,
+    }
+
+    wandb.init(
+        project=wandb_project,
+        name=wandb_run_name,
+        mode=args.wandb_mode,
+        config=wandb_config,
+    )
+
+    # Link to training run if provided
+    if args.wandb_run_id:
+        wandb.config.update({"training_run_id": args.wandb_run_id})
+
     # Device (CUDA > MPS > CPU)
     device = get_device()
     print(f"Using device: {device}")
+    wandb.config.update({"device": str(device)})
 
     # Load model
     checkpoint = torch.load(args.checkpoint, map_location=device)
@@ -378,6 +446,16 @@ def main():
     model.load_state_dict(checkpoint["model_state_dict"])
     print(f"Loaded model from epoch {checkpoint['epoch']}")
     print(f"Validation MAE: {checkpoint.get('val_mae', 'N/A')}")
+
+    # Log checkpoint info to wandb
+    wandb.config.update(
+        {
+            "checkpoint_epoch": checkpoint["epoch"],
+            "checkpoint_val_mae": checkpoint.get("val_mae", None),
+            "model_hidden_dim": model_args.get("hidden_dim", 64),
+            "model_num_layers": model_args.get("num_layers", 3),
+        }
+    )
 
     # Create output directory
     output_dir = Path(args.output_dir)
@@ -401,6 +479,16 @@ def main():
     print(f"  MAPE: {mape_id:.2f}%")
     print(f"  Avg Inference Time: {avg_time_id*1000:.4f} ms")
 
+    # Log sequential data (inference times distribution) to wandb
+    if len(inference_times_id) > 0:
+        wandb.log(
+            {
+                "eval/in_distribution/inference_time_distribution": wandb.Histogram(
+                    inference_times_id
+                ),
+            }
+        )
+
     # Evaluate on out-of-distribution graphs (different sizes)
     print("\nGenerating out-of-distribution test graphs...")
     ood_generator = SyntheticGraphGenerator(seed=args.seed + 200)
@@ -423,6 +511,16 @@ def main():
     # Generalization gap
     generalization_gap_mape = mape_ood - mape_id
     print(f"\nGeneralization Gap (MAPE): {generalization_gap_mape:.2f}%")
+
+    # Log sequential data (inference times distribution) to wandb
+    if len(inference_times_ood) > 0:
+        wandb.log(
+            {
+                "eval/out_of_distribution/inference_time_distribution": wandb.Histogram(
+                    inference_times_ood
+                ),
+            }
+        )
 
     # Benchmark Dijkstra if requested
     dijkstra_results = {}
@@ -457,6 +555,64 @@ def main():
             "speedup_id": speedup_id,
             "speedup_ood": speedup_ood,
         }
+
+        # Log sequential comparison data (histograms) to wandb
+        if len(inference_times_dijkstra_id) > 0:
+            wandb.log(
+                {
+                    "eval/dijkstra/inference_time_distribution_id": wandb.Histogram(
+                        inference_times_dijkstra_id
+                    ),
+                }
+            )
+        if len(inference_times_dijkstra_ood) > 0:
+            wandb.log(
+                {
+                    "eval/dijkstra/inference_time_distribution_ood": wandb.Histogram(
+                        inference_times_dijkstra_ood
+                    ),
+                }
+            )
+
+        # Create comparison plot
+        try:
+            import matplotlib.pyplot as plt
+
+            fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+            # Speed comparison bar chart
+            categories = ["ID", "OOD"]
+            gnn_times = [avg_time_id * 1000, avg_time_ood * 1000]
+            dijkstra_times = [avg_time_dijkstra_id * 1000, avg_time_dijkstra_ood * 1000]
+
+            x = np.arange(len(categories))
+            width = 0.35
+
+            axes[0].bar(x - width / 2, gnn_times, width, label="GNN", alpha=0.8)
+            axes[0].bar(
+                x + width / 2, dijkstra_times, width, label="Dijkstra", alpha=0.8
+            )
+            axes[0].set_ylabel("Avg Inference Time (ms)")
+            axes[0].set_title("GNN vs Dijkstra - Inference Time")
+            axes[0].set_xticks(x)
+            axes[0].set_xticklabels(categories)
+            axes[0].legend()
+            axes[0].grid(True, alpha=0.3)
+
+            # Speedup bar chart
+            speedups = [speedup_id, speedup_ood]
+            colors = ["green" if s > 1 else "red" for s in speedups]
+            axes[1].bar(categories, speedups, color=colors, alpha=0.8)
+            axes[1].axhline(y=1, color="black", linestyle="--", linewidth=1)
+            axes[1].set_ylabel("Speedup Factor")
+            axes[1].set_title("GNN Speedup vs Dijkstra")
+            axes[1].grid(True, alpha=0.3)
+
+            plt.tight_layout()
+            wandb.log({"eval/dijkstra/comparison_chart": wandb.Image(fig)})
+            plt.close(fig)
+        except ImportError:
+            print("Warning: matplotlib not available, skipping comparison plot")
 
     # Evaluate on Topology Zoo networks if provided
     topology_zoo_results = {}
@@ -517,10 +673,62 @@ def main():
                     dijkstra_results["avg_time_tz"] = avg_time_dijkstra_tz
                     dijkstra_results["speedup_tz"] = speedup_tz
 
+                    # Log sequential data (histogram) to wandb
+                    if len(inference_times_dijkstra_tz) > 0:
+                        wandb.log(
+                            {
+                                "eval/dijkstra/inference_time_distribution_tz": wandb.Histogram(
+                                    inference_times_dijkstra_tz
+                                ),
+                            }
+                        )
+
                 # Comparison with synthetic
                 print(f"\nComparison with Synthetic Graphs:")
                 print(f"  MAPE Gap (TZ vs ID): {mape_tz - mape_id:.2f}%")
                 print(f"  MAPE Gap (TZ vs OOD): {mape_tz - mape_ood:.2f}%")
+
+                # Log sequential data (per-network breakdown) and histograms to wandb
+                if len(inference_times_tz) > 0:
+                    wandb.log(
+                        {
+                            "eval/topology_zoo/inference_time_distribution": wandb.Histogram(
+                                inference_times_tz
+                            ),
+                        }
+                    )
+
+                # Create per-network breakdown plot if we have results
+                if per_network_results:
+                    try:
+                        import matplotlib.pyplot as plt
+
+                        # Extract per-network MAPE for visualization
+                        network_names = [
+                            r.get("name", f"Network_{i}")[:20]
+                            for i, r in enumerate(per_network_results)
+                        ]
+                        network_mape = [r["mape"] for r in per_network_results]
+
+                        fig, ax = plt.subplots(
+                            figsize=(max(12, len(network_names) * 0.3), 6)
+                        )
+                        ax.barh(range(len(network_names)), network_mape, alpha=0.7)
+                        ax.set_yticks(range(len(network_names)))
+                        ax.set_yticklabels(network_names)
+                        ax.set_xlabel("MAPE (%)")
+                        ax.set_title("Topology Zoo - Per-Network MAPE")
+                        ax.grid(True, alpha=0.3, axis="x")
+                        plt.tight_layout()
+
+                        wandb.log(
+                            {"eval/topology_zoo/per_network_mape": wandb.Image(fig)}
+                        )
+                        plt.close(fig)
+                    except ImportError:
+                        print(
+                            "Warning: matplotlib not available, skipping per-network plot"
+                        )
 
                 topology_zoo_results = {
                     "overall": {
@@ -560,6 +768,76 @@ def main():
         json.dump(results, f, indent=2)
 
     print(f"\nResults saved to: {output_dir / 'evaluation_results.json'}")
+
+    # Log summary metrics to wandb (single values only)
+    wandb.summary.update(
+        {
+            "eval/in_distribution/mae": mae_id,
+            "eval/in_distribution/mape": mape_id,
+            "eval/in_distribution/avg_inference_time": avg_time_id,
+            "eval/in_distribution/num_samples": len(inference_times_id),
+            "eval/out_of_distribution/mae": mae_ood,
+            "eval/out_of_distribution/mape": mape_ood,
+            "eval/out_of_distribution/avg_inference_time": avg_time_ood,
+            "eval/out_of_distribution/num_samples": len(inference_times_ood),
+            "eval/generalization/mape_gap": generalization_gap_mape,
+        }
+    )
+
+    if dijkstra_results:
+        wandb.summary.update(
+            {
+                "eval/dijkstra/avg_time_id": dijkstra_results.get("avg_time_id"),
+                "eval/dijkstra/avg_time_ood": dijkstra_results.get("avg_time_ood"),
+                "eval/dijkstra/speedup_id": dijkstra_results.get("speedup_id"),
+                "eval/dijkstra/speedup_ood": dijkstra_results.get("speedup_ood"),
+            }
+        )
+        if "avg_time_tz" in dijkstra_results:
+            wandb.summary.update(
+                {
+                    "eval/dijkstra/avg_time_tz": dijkstra_results["avg_time_tz"],
+                    "eval/dijkstra/speedup_tz": dijkstra_results["speedup_tz"],
+                }
+            )
+
+    if topology_zoo_results:
+        wandb.summary.update(
+            {
+                "eval/topology_zoo/overall/mae": topology_zoo_results["overall"]["mae"],
+                "eval/topology_zoo/overall/mape": topology_zoo_results["overall"][
+                    "mape"
+                ],
+                "eval/topology_zoo/overall/avg_inference_time": topology_zoo_results[
+                    "overall"
+                ]["avg_inference_time"],
+                "eval/topology_zoo/overall/num_samples": topology_zoo_results[
+                    "overall"
+                ]["num_samples"],
+                "eval/topology_zoo/overall/num_networks": topology_zoo_results[
+                    "overall"
+                ]["num_networks"],
+                "eval/topology_zoo/comparison/mape_gap_vs_id": topology_zoo_results[
+                    "comparison"
+                ]["mape_gap_vs_id"],
+                "eval/topology_zoo/comparison/mape_gap_vs_ood": topology_zoo_results[
+                    "comparison"
+                ]["mape_gap_vs_ood"],
+            }
+        )
+
+    # Save evaluation results as wandb artifact
+    results_file = output_dir / "evaluation_results.json"
+    if results_file.exists():
+        artifact = wandb.Artifact(
+            "evaluation_results",
+            type="evaluation_data",
+            description="Complete evaluation results including in-distribution, out-of-distribution, and Topology Zoo metrics",
+        )
+        artifact.add_file(str(results_file))
+        wandb.log_artifact(artifact)
+
+    wandb.finish()
 
 
 if __name__ == "__main__":

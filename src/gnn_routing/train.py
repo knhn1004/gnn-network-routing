@@ -9,6 +9,10 @@ import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 import json
+import wandb
+from datetime import datetime
+from dotenv import load_dotenv
+import os
 
 from gnn_routing.data import SyntheticGraphGenerator, create_training_pairs
 from gnn_routing.models import MPNN
@@ -167,16 +171,63 @@ def main():
         help="Directory to save checkpoints",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument(
+        "--wandb_project",
+        type=str,
+        default=None,
+        help="W&B project name (overrides env var WANDB_PROJECT)",
+    )
+    parser.add_argument(
+        "--wandb_run_name",
+        type=str,
+        default=None,
+        help="W&B run name (overrides auto-generated name)",
+    )
+    parser.add_argument(
+        "--wandb_mode",
+        type=str,
+        default="online",
+        choices=["online", "offline", "disabled"],
+        help="W&B logging mode",
+    )
 
     args = parser.parse_args()
+
+    # Load environment variables from .env file
+    load_dotenv()
 
     # Set random seeds
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
+    # Get wandb project name from env or args
+    wandb_project = args.wandb_project or os.getenv(
+        "WANDB_PROJECT", "gnn-network-routing"
+    )
+
+    # Generate run name: project_name + serialized datetime
+    if args.wandb_run_name:
+        wandb_run_name = args.wandb_run_name
+    else:
+        dt_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        wandb_run_name = f"{wandb_project}_{dt_str}"
+
+    # Initialize wandb
+    wandb.init(
+        project=wandb_project,
+        name=wandb_run_name,
+        mode=args.wandb_mode,
+        config=vars(args),
+    )
+
     # Device (CUDA > MPS > CPU)
     device = get_device()
     print(f"Using device: {device}")
+    wandb.config.update(
+        {
+            "system/device": str(device),
+        }
+    )
 
     # Create checkpoint directory
     checkpoint_dir = Path(args.checkpoint_dir)
@@ -231,7 +282,15 @@ def main():
         dropout=0.1,
     ).to(device)
 
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    num_params = sum(p.numel() for p in model.parameters())
+    print(f"Model parameters: {num_params:,}")
+    wandb.config.update(
+        {
+            "model/num_parameters": num_params,
+            "model/hidden_dim": args.hidden_dim,
+            "model/num_layers": args.num_layers,
+        }
+    )
 
     # Loss and optimizer
     criterion = nn.MSELoss()
@@ -239,6 +298,7 @@ def main():
 
     # Training loop with early stopping
     best_val_mae = float("inf")
+    best_epoch_num = 0
     patience_counter = 0
     train_losses = []
     val_losses = []
@@ -260,9 +320,21 @@ def main():
         print(f"  Val Loss: {val_loss:.6f}")
         print(f"  Val MAE: {val_mae:.6f}")
 
+        # Log sequential metrics to wandb (per-epoch data)
+        # Using metric namespacing to group train_loss and val_loss together
+        wandb.log(
+            {
+                "epoch": epoch + 1,
+                "loss/train": train_loss,  # Grouped under "loss"
+                "loss/val": val_loss,  # Grouped under "loss"
+                "metrics/val_mae": val_mae,  # Separate grouping for MAE
+            }
+        )
+
         # Checkpoint best model
         if val_mae < best_val_mae:
             best_val_mae = val_mae
+            best_epoch_num = epoch + 1
             patience_counter = 0
 
             # Save checkpoint
@@ -274,8 +346,17 @@ def main():
                 "val_mae": val_mae,
                 "args": vars(args),
             }
-            torch.save(checkpoint, checkpoint_dir / "best_model.pt")
+            checkpoint_path = checkpoint_dir / "best_model.pt"
+            torch.save(checkpoint, checkpoint_path)
             print(f"  ✓ Saved best model (Val MAE: {val_mae:.6f})")
+
+            # Log best model checkpoint as sequential data (tracks improvement over epochs)
+            wandb.log(
+                {
+                    "best/metrics/val_mae": val_mae,  # Best metrics grouped together
+                    "best/epoch": best_epoch_num,  # Best epoch tracking
+                }
+            )
         else:
             patience_counter += 1
 
@@ -300,6 +381,122 @@ def main():
     print(f"\nTraining completed!")
     print(f"Best validation MAE: {best_val_mae:.6f}")
     print(f"Model saved to: {checkpoint_dir / 'best_model.pt'}")
+
+    # Create training curves plots
+    try:
+        import matplotlib.pyplot as plt
+
+        epochs_range = range(1, len(train_losses) + 1)
+
+        # Dedicated Train vs Val Loss curve
+        fig_loss, ax_loss = plt.subplots(figsize=(10, 6))
+        ax_loss.plot(
+            epochs_range,
+            train_losses,
+            label="Train Loss",
+            marker="o",
+            linewidth=2,
+            markersize=4,
+        )
+        ax_loss.plot(
+            epochs_range,
+            val_losses,
+            label="Val Loss",
+            marker="s",
+            linewidth=2,
+            markersize=4,
+        )
+        ax_loss.set_xlabel("Epoch", fontsize=12)
+        ax_loss.set_ylabel("Loss", fontsize=12)
+        ax_loss.set_title("Train vs Validation Loss", fontsize=14, fontweight="bold")
+        ax_loss.legend(fontsize=11)
+        ax_loss.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        # Log the loss curve separately
+        wandb.log({"loss_epoch_curve": wandb.Image(fig_loss)})
+        plt.close(fig_loss)
+
+        # Additional training curves plot
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+        # Training/Validation Loss
+        axes[0].plot(epochs_range, train_losses, label="Train Loss", marker="o")
+        axes[0].plot(epochs_range, val_losses, label="Val Loss", marker="s")
+        axes[0].set_xlabel("Epoch")
+        axes[0].set_ylabel("Loss")
+        axes[0].set_title("Training and Validation Loss")
+        axes[0].legend()
+        axes[0].grid(True)
+
+        # Validation MAE
+        axes[1].plot(epochs_range, val_maes, label="Val MAE", marker="o", color="green")
+        axes[1].set_xlabel("Epoch")
+        axes[1].set_ylabel("MAE")
+        axes[1].set_title("Validation MAE")
+        axes[1].legend()
+        axes[1].grid(True)
+
+        # Combined view
+        ax2_twin = axes[2].twinx()
+        line1 = axes[2].plot(
+            epochs_range, train_losses, label="Train Loss", marker="o", color="blue"
+        )
+        line2 = axes[2].plot(
+            epochs_range, val_losses, label="Val Loss", marker="s", color="red"
+        )
+        line3 = ax2_twin.plot(
+            epochs_range, val_maes, label="Val MAE", marker="^", color="green"
+        )
+        axes[2].set_xlabel("Epoch")
+        axes[2].set_ylabel("Loss", color="black")
+        ax2_twin.set_ylabel("MAE", color="green")
+        axes[2].set_title("Training Overview")
+        axes[2].grid(True)
+
+        # Combined legend
+        lines = line1 + line2 + line3
+        labels = [l.get_label() for l in lines]
+        axes[2].legend(lines, labels, loc="upper left")
+
+        plt.tight_layout()
+
+        # Log the combined plot to wandb
+        wandb.log({"training_curves": wandb.Image(fig)})
+        plt.close(fig)
+    except ImportError:
+        print("Warning: matplotlib not available, skipping training curves plot")
+
+    # Log final summary to wandb (single values) - organized by category
+    wandb.summary.update(
+        {
+            # Best metrics (overall best performance)
+            "best/metrics/val_mae": best_val_mae,
+            "best/epoch": best_epoch_num,
+            # Training progress
+            "training/total_epochs": len(train_losses),
+            "training/completed": True,
+            # Final metrics (last epoch performance)
+            "loss/final_train": train_losses[-1] if train_losses else None,
+            "loss/final_val": val_losses[-1] if val_losses else None,
+            "metrics/final_val_mae": val_maes[-1] if val_maes else None,
+        }
+    )
+
+    # Save artifacts: training history and model checkpoint
+    history_file = checkpoint_dir / "training_history.json"
+    if history_file.exists():
+        artifact = wandb.Artifact("training_history", type="training_data")
+        artifact.add_file(str(history_file))
+        wandb.log_artifact(artifact)
+
+    checkpoint_path = checkpoint_dir / "best_model.pt"
+    if checkpoint_path.exists():
+        artifact = wandb.Artifact("best_model", type="model")
+        artifact.add_file(str(checkpoint_path))
+        wandb.log_artifact(artifact)
+
+    wandb.finish()
 
 
 if __name__ == "__main__":

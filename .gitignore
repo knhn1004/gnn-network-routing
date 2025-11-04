@@ -60,3 +60,6 @@ htmlcov/
 data/
 *.pickle
 *.pkl
+
+wandb/
+.env
