@@ -21,7 +21,7 @@ from gnn_routing.data import (
     compute_shortest_paths,
     load_topology_zoo_networks,
 )
-from gnn_routing.models import MPNN
+from gnn_routing.models import create_model
 
 
 def get_device():
@@ -433,14 +433,22 @@ def main():
     # Load model
     checkpoint = torch.load(args.checkpoint, map_location=device)
     model_args = checkpoint.get("args", {})
+    
+    # Determine model type from checkpoint or args
+    model_type = model_args.get("model_type", "mpnn")
+    num_heads = model_args.get("num_heads", 4)
+    use_layer_norm = model_args.get("use_layer_norm", False)
 
-    model = MPNN(
+    model = create_model(
+        model_type=model_type,
         node_feature_dim=4,
         edge_feature_dim=1,
         hidden_dim=model_args.get("hidden_dim", 64),
         num_layers=model_args.get("num_layers", 3),
         output_dim=1,
         dropout=0.1,
+        num_heads=num_heads,
+        use_layer_norm=use_layer_norm,
     ).to(device)
 
     model.load_state_dict(checkpoint["model_state_dict"])

@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 import os
 
 from gnn_routing.data import SyntheticGraphGenerator, create_training_pairs
-from gnn_routing.models import MPNN
+from gnn_routing.models import create_model
 
 
 def get_device():
@@ -58,8 +58,8 @@ def collate_fn(batch):
     return data_list, targets
 
 
-def train_epoch(model, dataloader, optimizer, criterion, device):
-    """Train for one epoch.
+def train_epoch(model, dataloader, optimizer, criterion, device, gradient_accumulation_steps=1, use_amp=False, scaler=None):
+    """Train for one epoch with gradient accumulation and mixed precision support.
 
     Returns:
         Average loss for the epoch
@@ -67,8 +67,9 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
     model.train()
     total_loss = 0.0
     num_batches = 0
+    optimizer.zero_grad()
 
-    for batch in tqdm(dataloader, desc="Training", unit="batch", leave=False):
+    for batch_idx, batch in enumerate(tqdm(dataloader, desc="Training", unit="batch", leave=False)):
         data_list, targets = batch
         targets = targets.to(device)
 
@@ -79,16 +80,42 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
             data = data.to(device)
             target = target.to(device)
 
-            optimizer.zero_grad()
-            output = model(data)
-            loss = criterion(output, target)
-            loss.backward()
-            optimizer.step()
+            if use_amp and scaler is not None:
+                with torch.cuda.amp.autocast():
+                    output = model(data)
+                    loss = criterion(output, target)
+                    loss = loss / gradient_accumulation_steps
+                
+                scaler.scale(loss).backward()
+                batch_loss += loss.item() * gradient_accumulation_steps
+            else:
+                output = model(data)
+                loss = criterion(output, target)
+                # Scale loss by gradient accumulation steps
+                loss = loss / gradient_accumulation_steps
+                loss.backward()
+                batch_loss += loss.item() * gradient_accumulation_steps
 
-            batch_loss += loss.item()
+        # Update weights every gradient_accumulation_steps batches
+        if (batch_idx + 1) % gradient_accumulation_steps == 0:
+            if use_amp and scaler is not None:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+            optimizer.zero_grad()
 
         total_loss += batch_loss / batch_size
         num_batches += 1
+
+    # Handle remaining gradients if batch count is not divisible by gradient_accumulation_steps
+    if num_batches % gradient_accumulation_steps != 0:
+        if use_amp and scaler is not None:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
+        optimizer.zero_grad()
 
     return total_loss / num_batches if num_batches > 0 else 0.0
 
@@ -138,6 +165,17 @@ def main():
         "--n_val_graphs", type=int, default=20, help="Number of validation graphs"
     )
     parser.add_argument(
+        "--dataset_multiplier",
+        type=int,
+        default=10,
+        help="Multiplier for dataset size (default: 10x)",
+    )
+    parser.add_argument(
+        "--use_augmentation",
+        action="store_true",
+        help="Use graph augmentation techniques (edge rewiring, weight perturbation, subgraph sampling)",
+    )
+    parser.add_argument(
         "--n_pairs_per_graph",
         type=int,
         default=10,
@@ -157,6 +195,18 @@ def main():
         "--num_layers", type=int, default=3, help="Number of GNN layers"
     )
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
+    parser.add_argument(
+        "--gradient_accumulation_steps",
+        type=int,
+        default=1,
+        help="Number of gradient accumulation steps (effective batch size = batch_size * gradient_accumulation_steps)",
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=0,
+        help="Number of data loading workers (0 = main process only)",
+    )
     parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
     parser.add_argument(
         "--epochs", type=int, default=100, help="Number of training epochs"
@@ -189,6 +239,53 @@ def main():
         default="online",
         choices=["online", "offline", "disabled"],
         help="W&B logging mode",
+    )
+    parser.add_argument(
+        "--model_type",
+        type=str,
+        default="mpnn",
+        choices=["mpnn", "gat"],
+        help="Model architecture type",
+    )
+    parser.add_argument(
+        "--num_heads",
+        type=int,
+        default=4,
+        help="Number of attention heads (for GAT only)",
+    )
+    parser.add_argument(
+        "--use_layer_norm",
+        action="store_true",
+        help="Use layer normalization (for GAT only)",
+    )
+    parser.add_argument(
+        "--use_amp",
+        action="store_true",
+        help="Use automatic mixed precision (FP16) training",
+    )
+    parser.add_argument(
+        "--lr_scheduler",
+        type=str,
+        default=None,
+        choices=[None, "cosine", "plateau"],
+        help="Learning rate scheduler type",
+    )
+    parser.add_argument(
+        "--include_graph_features",
+        action="store_true",
+        help="Include graph-level features (density, clustering, etc.)",
+    )
+    parser.add_argument(
+        "--include_extra_centrality",
+        action="store_true",
+        help="Include additional centrality measures (closeness, eigenvector, PageRank)",
+    )
+    parser.add_argument(
+        "--positional_encoding",
+        type=str,
+        default=None,
+        choices=[None, "laplacian", "random_walk"],
+        help="Type of positional encoding to use",
     )
 
     args = parser.parse_args()
@@ -234,10 +331,13 @@ def main():
     checkpoint_dir.mkdir(exist_ok=True)
 
     # Generate training data
-    print("Generating training graphs...")
+    n_train_graphs_actual = args.n_train_graphs * args.dataset_multiplier
+    print(f"Generating training graphs ({n_train_graphs_actual} graphs with {args.dataset_multiplier}x multiplier)...")
     train_generator = SyntheticGraphGenerator(seed=args.seed)
     train_graphs = train_generator.generate_dataset(
-        n_graphs=args.n_train_graphs, node_range=tuple(args.node_range)
+        n_graphs=n_train_graphs_actual,
+        node_range=tuple(args.node_range),
+        use_augmentation=args.use_augmentation,
     )
 
     print("Generating validation graphs...")
@@ -245,41 +345,103 @@ def main():
     val_graphs = val_generator.generate_dataset(
         n_graphs=args.n_val_graphs, node_range=tuple(args.node_range)
     )
+    
+    # Log dataset statistics
+    train_node_counts = [len(G) for G in train_graphs]
+    train_edge_counts = [G.number_of_edges() for G in train_graphs]
+    val_node_counts = [len(G) for G in val_graphs]
+    val_edge_counts = [G.number_of_edges() for G in val_graphs]
+    
+    print(f"\nDataset Statistics:")
+    print(f"  Training graphs: {len(train_graphs)}")
+    print(f"    Node range: {min(train_node_counts)}-{max(train_node_counts)} (avg: {np.mean(train_node_counts):.1f})")
+    print(f"    Edge range: {min(train_edge_counts)}-{max(train_edge_counts)} (avg: {np.mean(train_edge_counts):.1f})")
+    print(f"  Validation graphs: {len(val_graphs)}")
+    print(f"    Node range: {min(val_node_counts)}-{max(val_node_counts)} (avg: {np.mean(val_node_counts):.1f})")
+    print(f"    Edge range: {min(val_edge_counts)}-{max(val_edge_counts)} (avg: {np.mean(val_edge_counts):.1f})")
+    
+    wandb.config.update(
+        {
+            "dataset/train_graphs": len(train_graphs),
+            "dataset/val_graphs": len(val_graphs),
+            "dataset/multiplier": args.dataset_multiplier,
+            "dataset/use_augmentation": args.use_augmentation,
+            "dataset/train_avg_nodes": float(np.mean(train_node_counts)),
+            "dataset/train_avg_edges": float(np.mean(train_edge_counts)),
+        }
+    )
 
     # Create training pairs
     print("Creating training pairs...")
     train_pairs = create_training_pairs(
-        train_graphs, n_pairs_per_graph=args.n_pairs_per_graph, seed=args.seed
+        train_graphs,
+        n_pairs_per_graph=args.n_pairs_per_graph,
+        seed=args.seed,
+        include_graph_features=args.include_graph_features,
+        include_extra_centrality=args.include_extra_centrality,
+        positional_encoding=args.positional_encoding,
     )
 
     print("Creating validation pairs...")
     val_pairs = create_training_pairs(
-        val_graphs, n_pairs_per_graph=args.n_pairs_per_graph, seed=args.seed + 1
+        val_graphs,
+        n_pairs_per_graph=args.n_pairs_per_graph,
+        seed=args.seed + 1,
+        include_graph_features=args.include_graph_features,
+        include_extra_centrality=args.include_extra_centrality,
+        positional_encoding=args.positional_encoding,
     )
 
     print(f"Training samples: {len(train_pairs)}")
     print(f"Validation samples: {len(val_pairs)}")
+
+    # Auto-detect node feature dimension from first sample
+    if len(train_pairs) > 0:
+        sample_data, _ = train_pairs[0]
+        node_feature_dim = sample_data.x.shape[1]
+        print(f"Detected node feature dimension: {node_feature_dim}")
+    else:
+        # Fallback: calculate based on defaults
+        # Base: 4 (degree, betweenness, is_source, is_target)
+        # Extra centrality: +3 (closeness, eigenvector, PageRank) - default True
+        # Graph features: +5 (density, clustering, path length, diameter, components) - default True
+        # Positional encoding: +0 (default None)
+        node_feature_dim = 4 + 3 + 5  # 12 features by default
+        print(f"Using default node feature dimension: {node_feature_dim}")
 
     # Create data loaders
     train_dataset = ShortestPathDataset(train_pairs)
     val_dataset = ShortestPathDataset(val_pairs)
 
     train_loader = DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        collate_fn=collate_fn,
+        num_workers=args.num_workers,
+        pin_memory=True if device.type == "cuda" else False,
     )
 
     val_loader = DataLoader(
-        val_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate_fn
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        collate_fn=collate_fn,
+        num_workers=args.num_workers,
+        pin_memory=True if device.type == "cuda" else False,
     )
 
     # Initialize model
-    model = MPNN(
-        node_feature_dim=4,
+    model = create_model(
+        model_type=args.model_type,
+        node_feature_dim=node_feature_dim,
         edge_feature_dim=1,
         hidden_dim=args.hidden_dim,
         num_layers=args.num_layers,
         output_dim=1,
         dropout=0.1,
+        num_heads=args.num_heads,
+        use_layer_norm=args.use_layer_norm,
     ).to(device)
 
     num_params = sum(p.numel() for p in model.parameters())
@@ -287,14 +449,44 @@ def main():
     wandb.config.update(
         {
             "model/num_parameters": num_params,
+            "model/type": args.model_type,
             "model/hidden_dim": args.hidden_dim,
             "model/num_layers": args.num_layers,
+            "model/num_heads": args.num_heads if args.model_type == "gat" else None,
+            "model/use_layer_norm": args.use_layer_norm if args.model_type == "gat" else None,
+            "training/effective_batch_size": args.batch_size * args.gradient_accumulation_steps,
+            "training/gradient_accumulation_steps": args.gradient_accumulation_steps,
+            "training/num_workers": args.num_workers,
+            "training/use_amp": args.use_amp,
+            "training/lr_scheduler": args.lr_scheduler,
         }
     )
 
     # Loss and optimizer
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    
+    # Mixed precision scaler
+    scaler = None
+    if args.use_amp and device.type == "cuda":
+        scaler = torch.cuda.amp.GradScaler()
+        print("Using automatic mixed precision (FP16) training")
+    elif args.use_amp and device.type != "cuda":
+        print("Warning: Mixed precision only supported on CUDA, disabling...")
+        args.use_amp = False
+    
+    # Learning rate scheduler
+    scheduler = None
+    if args.lr_scheduler == "cosine":
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=args.epochs, eta_min=args.lr * 0.01
+        )
+        print(f"Using CosineAnnealingLR scheduler")
+    elif args.lr_scheduler == "plateau":
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=5, verbose=True
+        )
+        print(f"Using ReduceLROnPlateau scheduler")
 
     # Training loop with early stopping
     best_val_mae = float("inf")
@@ -305,15 +497,34 @@ def main():
     val_maes = []
 
     print("\nStarting training...")
+    print(f"Effective batch size: {args.batch_size * args.gradient_accumulation_steps}")
     for epoch in range(args.epochs):
         # Train
-        train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
+        train_loss = train_epoch(
+            model,
+            train_loader,
+            optimizer,
+            criterion,
+            device,
+            args.gradient_accumulation_steps,
+            args.use_amp,
+            scaler,
+        )
         train_losses.append(train_loss)
 
         # Validate
         val_loss, val_mae = validate(model, val_loader, criterion, device)
         val_losses.append(val_loss)
         val_maes.append(val_mae)
+        
+        # Update learning rate scheduler
+        if scheduler is not None:
+            if args.lr_scheduler == "cosine":
+                scheduler.step()
+            elif args.lr_scheduler == "plateau":
+                scheduler.step(val_loss)
+            current_lr = optimizer.param_groups[0]["lr"]
+            wandb.log({"learning_rate": current_lr})
 
         print(f"Epoch {epoch+1}/{args.epochs}")
         print(f"  Train Loss: {train_loss:.6f}")
