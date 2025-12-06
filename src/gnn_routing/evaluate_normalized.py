@@ -240,10 +240,13 @@ def evaluate_model_normalized(
                     shortest_path_dist=shortest_dist_original,
                     normalization_method=normalization_method,
                 )
-                
+
                 # Preprocess for model (use standard preprocessing with unnormalized target)
                 data, _ = preprocess_graph(
-                    G, source=source, target=target, shortest_path_dist=shortest_dist_original
+                    G,
+                    source=source,
+                    target=target,
+                    shortest_path_dist=shortest_dist_original,
                 )
                 data = data.to(device)
 
@@ -253,7 +256,7 @@ def evaluate_model_normalized(
                 inference_time = time.perf_counter() - start_time
 
                 pred_original = output.cpu().item()
-                
+
                 # Compute normalized versions for comparison
                 if normalization_method == "log":
                     pred_normalized = np.log10(pred_original + 1)
@@ -398,7 +401,7 @@ def main():
     # Load model
     checkpoint = torch.load(args.checkpoint, map_location=device)
     model_args = checkpoint.get("args", {})
-    
+
     # Determine model type from checkpoint or args
     model_type = model_args.get("model_type", "mpnn")
     num_heads = model_args.get("num_heads", 4)
@@ -492,7 +495,9 @@ def main():
                 }
 
     # Save results
-    results_file = output_dir / f"evaluation_results_normalized_{args.normalization_method}.json"
+    results_file = (
+        output_dir / f"evaluation_results_normalized_{args.normalization_method}.json"
+    )
     with open(results_file, "w") as f:
         json.dump(results, f, indent=2)
 
@@ -523,4 +528,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

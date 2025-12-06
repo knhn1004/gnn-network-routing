@@ -10,38 +10,40 @@ from typing import List, Dict
 
 def compute_graph_metrics(G: nx.Graph) -> Dict:
     """Compute detailed graph metrics.
-    
+
     Args:
         G: NetworkX graph
-        
+
     Returns:
         Dictionary of graph metrics
     """
     metrics = {}
-    
+
     n = len(G)
     if n == 0:
         return metrics
-    
+
     # Basic metrics
-    metrics['num_nodes'] = n
-    metrics['num_edges'] = G.number_of_edges()
-    metrics['density'] = G.number_of_edges() / (n * (n - 1) / 2.0) if n > 1 else 0.0
-    
+    metrics["num_nodes"] = n
+    metrics["num_edges"] = G.number_of_edges()
+    metrics["density"] = G.number_of_edges() / (n * (n - 1) / 2.0) if n > 1 else 0.0
+
     # Clustering coefficient
     try:
-        metrics['avg_clustering'] = nx.average_clustering(G)
+        metrics["avg_clustering"] = nx.average_clustering(G)
     except:
-        metrics['avg_clustering'] = 0.0
-    
+        metrics["avg_clustering"] = 0.0
+
     # Average shortest path length and diameter (approximate for large graphs)
     if n <= 100:
         try:
-            metrics['avg_path_length'] = nx.average_shortest_path_length(G, weight='weight')
-            metrics['diameter'] = nx.diameter(G)
+            metrics["avg_path_length"] = nx.average_shortest_path_length(
+                G, weight="weight"
+            )
+            metrics["diameter"] = nx.diameter(G)
         except:
-            metrics['avg_path_length'] = 0.0
-            metrics['diameter'] = 0.0
+            metrics["avg_path_length"] = 0.0
+            metrics["diameter"] = 0.0
     else:
         # Approximate for large graphs
         sample_size = min(50, n // 2)
@@ -49,47 +51,51 @@ def compute_graph_metrics(G: nx.Graph) -> Dict:
         subgraph = G.subgraph(sample_nodes)
         try:
             if nx.is_connected(subgraph):
-                metrics['avg_path_length'] = nx.average_shortest_path_length(subgraph, weight='weight')
-                metrics['diameter'] = nx.diameter(subgraph)
+                metrics["avg_path_length"] = nx.average_shortest_path_length(
+                    subgraph, weight="weight"
+                )
+                metrics["diameter"] = nx.diameter(subgraph)
             else:
-                metrics['avg_path_length'] = 0.0
-                metrics['diameter'] = 0.0
+                metrics["avg_path_length"] = 0.0
+                metrics["diameter"] = 0.0
         except:
-            metrics['avg_path_length'] = 0.0
-            metrics['diameter'] = 0.0
-    
+            metrics["avg_path_length"] = 0.0
+            metrics["diameter"] = 0.0
+
     # Modularity (community structure)
     try:
         if n <= 200:
             communities = nx.community.greedy_modularity_communities(G)
-            metrics['modularity'] = nx.community.modularity(G, communities)
+            metrics["modularity"] = nx.community.modularity(G, communities)
         else:
             # Approximate for large graphs
-            metrics['modularity'] = 0.0  # Skip for large graphs (expensive)
+            metrics["modularity"] = 0.0  # Skip for large graphs (expensive)
     except:
-        metrics['modularity'] = 0.0
-    
+        metrics["modularity"] = 0.0
+
     # Edge weight statistics
-    edge_weights = [G[u][v].get('weight', 1.0) for u, v in G.edges()]
+    edge_weights = [G[u][v].get("weight", 1.0) for u, v in G.edges()]
     if edge_weights:
-        metrics['weight_mean'] = np.mean(edge_weights)
-        metrics['weight_std'] = np.std(edge_weights)
-        metrics['weight_min'] = np.min(edge_weights)
-        metrics['weight_max'] = np.max(edge_weights)
-        metrics['weight_range'] = metrics['weight_max'] - metrics['weight_min']
+        metrics["weight_mean"] = np.mean(edge_weights)
+        metrics["weight_std"] = np.std(edge_weights)
+        metrics["weight_min"] = np.min(edge_weights)
+        metrics["weight_max"] = np.max(edge_weights)
+        metrics["weight_range"] = metrics["weight_max"] - metrics["weight_min"]
     else:
-        metrics['weight_mean'] = 0.0
-        metrics['weight_std'] = 0.0
-        metrics['weight_min'] = 0.0
-        metrics['weight_max'] = 0.0
-        metrics['weight_range'] = 0.0
-    
+        metrics["weight_mean"] = 0.0
+        metrics["weight_std"] = 0.0
+        metrics["weight_min"] = 0.0
+        metrics["weight_max"] = 0.0
+        metrics["weight_range"] = 0.0
+
     return metrics
 
 
-def analyze_network_patterns(results_file: str = "results/evaluation_results.json", topology_zoo_dir: str = None):
+def analyze_network_patterns(
+    results_file: str = "results/evaluation_results.json", topology_zoo_dir: str = None
+):
     """Analyze patterns in well vs poorly performing networks.
-    
+
     Args:
         results_file: Path to evaluation results JSON file
         topology_zoo_dir: Optional path to Topology Zoo GraphML directory for detailed metrics
@@ -100,7 +106,7 @@ def analyze_network_patterns(results_file: str = "results/evaluation_results.jso
     if not results_path.exists():
         print(f"Error: Results file not found: {results_file}")
         return
-    
+
     with open(results_path) as f:
         results = json.load(f)
 
@@ -112,21 +118,25 @@ def analyze_network_patterns(results_file: str = "results/evaluation_results.jso
     # Get top 10 best and worst
     best_10 = networks_sorted[:10]
     worst_10 = networks_sorted[-10:]
-    
+
     # Compute detailed graph metrics if topology_zoo_dir is provided
     if topology_zoo_dir:
         print("\nComputing detailed graph metrics...")
         from gnn_routing.data.topology_zoo import load_topology_zoo_networks
-        
+
         graphml_dir = Path(topology_zoo_dir)
         if graphml_dir.exists():
             # Load graphs and compute metrics
-            loaded_networks = load_topology_zoo_networks(graphml_dir, min_nodes=50, max_nodes=1000)
-            graph_dict = {name: G for G, meta in loaded_networks for name in [meta['name']]}
-            
+            loaded_networks = load_topology_zoo_networks(
+                graphml_dir, min_nodes=50, max_nodes=1000
+            )
+            graph_dict = {
+                name: G for G, meta in loaded_networks for name in [meta["name"]]
+            }
+
             # Add metrics to network results
             for network in networks:
-                network_name = network.get('name', '')
+                network_name = network.get("name", "")
                 if network_name in graph_dict:
                     G = graph_dict[network_name]
                     metrics = compute_graph_metrics(G)
@@ -149,7 +159,7 @@ def analyze_network_patterns(results_file: str = "results/evaluation_results.jso
         densities = [n["num_edges"] / n["num_nodes"] for n in network_list]
         maes = [n["mae"] for n in network_list]
         mapes = [n["mape"] for n in network_list]
-        
+
         stats = {
             "label": label,
             "nodes_mean": np.mean(nodes),
@@ -166,17 +176,31 @@ def analyze_network_patterns(results_file: str = "results/evaluation_results.jso
             "mape_mean": np.mean(mapes),
             "mape_std": np.std(mapes),
         }
-        
+
         # Add detailed metrics if available
         if "avg_clustering" in network_list[0]:
-            stats["avg_clustering_mean"] = np.mean([n.get("avg_clustering", 0.0) for n in network_list])
-            stats["avg_path_length_mean"] = np.mean([n.get("avg_path_length", 0.0) for n in network_list])
-            stats["diameter_mean"] = np.mean([n.get("diameter", 0.0) for n in network_list])
-            stats["modularity_mean"] = np.mean([n.get("modularity", 0.0) for n in network_list])
-            stats["weight_mean_mean"] = np.mean([n.get("weight_mean", 0.0) for n in network_list])
-            stats["weight_std_mean"] = np.mean([n.get("weight_std", 0.0) for n in network_list])
-            stats["weight_range_mean"] = np.mean([n.get("weight_range", 0.0) for n in network_list])
-        
+            stats["avg_clustering_mean"] = np.mean(
+                [n.get("avg_clustering", 0.0) for n in network_list]
+            )
+            stats["avg_path_length_mean"] = np.mean(
+                [n.get("avg_path_length", 0.0) for n in network_list]
+            )
+            stats["diameter_mean"] = np.mean(
+                [n.get("diameter", 0.0) for n in network_list]
+            )
+            stats["modularity_mean"] = np.mean(
+                [n.get("modularity", 0.0) for n in network_list]
+            )
+            stats["weight_mean_mean"] = np.mean(
+                [n.get("weight_mean", 0.0) for n in network_list]
+            )
+            stats["weight_std_mean"] = np.mean(
+                [n.get("weight_std", 0.0) for n in network_list]
+            )
+            stats["weight_range_mean"] = np.mean(
+                [n.get("weight_range", 0.0) for n in network_list]
+            )
+
         return stats
 
     best_stats = calc_stats(best_10, "Best 10")
@@ -357,13 +381,27 @@ def analyze_network_patterns(results_file: str = "results/evaluation_results.jso
         print("=" * 80)
         print(f"\n{'Metric':<30} {'Best 10':<20} {'Worst 10':<20} {'All Networks':<20}")
         print("-" * 90)
-        print(f"{'Avg Clustering':<30} {best_stats.get('avg_clustering_mean', 0.0):<20.3f} {worst_stats.get('avg_clustering_mean', 0.0):<20.3f} {all_stats.get('avg_clustering_mean', 0.0):<20.3f}")
-        print(f"{'Avg Path Length':<30} {best_stats.get('avg_path_length_mean', 0.0):<20.3f} {worst_stats.get('avg_path_length_mean', 0.0):<20.3f} {all_stats.get('avg_path_length_mean', 0.0):<20.3f}")
-        print(f"{'Avg Diameter':<30} {best_stats.get('diameter_mean', 0.0):<20.3f} {worst_stats.get('diameter_mean', 0.0):<20.3f} {all_stats.get('diameter_mean', 0.0):<20.3f}")
-        print(f"{'Avg Modularity':<30} {best_stats.get('modularity_mean', 0.0):<20.3f} {worst_stats.get('modularity_mean', 0.0):<20.3f} {all_stats.get('modularity_mean', 0.0):<20.3f}")
-        print(f"{'Avg Weight Mean':<30} {best_stats.get('weight_mean_mean', 0.0):<20.3f} {worst_stats.get('weight_mean_mean', 0.0):<20.3f} {all_stats.get('weight_mean_mean', 0.0):<20.3f}")
-        print(f"{'Avg Weight Std':<30} {best_stats.get('weight_std_mean', 0.0):<20.3f} {worst_stats.get('weight_std_mean', 0.0):<20.3f} {all_stats.get('weight_std_mean', 0.0):<20.3f}")
-        print(f"{'Avg Weight Range':<30} {best_stats.get('weight_range_mean', 0.0):<20.3f} {worst_stats.get('weight_range_mean', 0.0):<20.3f} {all_stats.get('weight_range_mean', 0.0):<20.3f}")
+        print(
+            f"{'Avg Clustering':<30} {best_stats.get('avg_clustering_mean', 0.0):<20.3f} {worst_stats.get('avg_clustering_mean', 0.0):<20.3f} {all_stats.get('avg_clustering_mean', 0.0):<20.3f}"
+        )
+        print(
+            f"{'Avg Path Length':<30} {best_stats.get('avg_path_length_mean', 0.0):<20.3f} {worst_stats.get('avg_path_length_mean', 0.0):<20.3f} {all_stats.get('avg_path_length_mean', 0.0):<20.3f}"
+        )
+        print(
+            f"{'Avg Diameter':<30} {best_stats.get('diameter_mean', 0.0):<20.3f} {worst_stats.get('diameter_mean', 0.0):<20.3f} {all_stats.get('diameter_mean', 0.0):<20.3f}"
+        )
+        print(
+            f"{'Avg Modularity':<30} {best_stats.get('modularity_mean', 0.0):<20.3f} {worst_stats.get('modularity_mean', 0.0):<20.3f} {all_stats.get('modularity_mean', 0.0):<20.3f}"
+        )
+        print(
+            f"{'Avg Weight Mean':<30} {best_stats.get('weight_mean_mean', 0.0):<20.3f} {worst_stats.get('weight_mean_mean', 0.0):<20.3f} {all_stats.get('weight_mean_mean', 0.0):<20.3f}"
+        )
+        print(
+            f"{'Avg Weight Std':<30} {best_stats.get('weight_std_mean', 0.0):<20.3f} {worst_stats.get('weight_std_mean', 0.0):<20.3f} {all_stats.get('weight_std_mean', 0.0):<20.3f}"
+        )
+        print(
+            f"{'Avg Weight Range':<30} {best_stats.get('weight_range_mean', 0.0):<20.3f} {worst_stats.get('weight_range_mean', 0.0):<20.3f} {all_stats.get('weight_range_mean', 0.0):<20.3f}"
+        )
 
     print("\n" + "=" * 80)
     print("CONCLUSION")
@@ -399,7 +437,10 @@ def analyze_network_patterns(results_file: str = "results/evaluation_results.jso
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Analyze network patterns in Topology Zoo results")
+
+    parser = argparse.ArgumentParser(
+        description="Analyze network patterns in Topology Zoo results"
+    )
     parser.add_argument(
         "--results_file",
         type=str,

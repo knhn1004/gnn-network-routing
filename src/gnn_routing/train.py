@@ -58,7 +58,16 @@ def collate_fn(batch):
     return data_list, targets
 
 
-def train_epoch(model, dataloader, optimizer, criterion, device, gradient_accumulation_steps=1, use_amp=False, scaler=None):
+def train_epoch(
+    model,
+    dataloader,
+    optimizer,
+    criterion,
+    device,
+    gradient_accumulation_steps=1,
+    use_amp=False,
+    scaler=None,
+):
     """Train for one epoch with gradient accumulation and mixed precision support.
 
     Returns:
@@ -69,7 +78,9 @@ def train_epoch(model, dataloader, optimizer, criterion, device, gradient_accumu
     num_batches = 0
     optimizer.zero_grad()
 
-    for batch_idx, batch in enumerate(tqdm(dataloader, desc="Training", unit="batch", leave=False)):
+    for batch_idx, batch in enumerate(
+        tqdm(dataloader, desc="Training", unit="batch", leave=False)
+    ):
         data_list, targets = batch
         targets = targets.to(device)
 
@@ -85,7 +96,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device, gradient_accumu
                     output = model(data)
                     loss = criterion(output, target)
                     loss = loss / gradient_accumulation_steps
-                
+
                 scaler.scale(loss).backward()
                 batch_loss += loss.item() * gradient_accumulation_steps
             else:
@@ -332,7 +343,9 @@ def main():
 
     # Generate training data
     n_train_graphs_actual = args.n_train_graphs * args.dataset_multiplier
-    print(f"Generating training graphs ({n_train_graphs_actual} graphs with {args.dataset_multiplier}x multiplier)...")
+    print(
+        f"Generating training graphs ({n_train_graphs_actual} graphs with {args.dataset_multiplier}x multiplier)..."
+    )
     train_generator = SyntheticGraphGenerator(seed=args.seed)
     train_graphs = train_generator.generate_dataset(
         n_graphs=n_train_graphs_actual,
@@ -345,21 +358,29 @@ def main():
     val_graphs = val_generator.generate_dataset(
         n_graphs=args.n_val_graphs, node_range=tuple(args.node_range)
     )
-    
+
     # Log dataset statistics
     train_node_counts = [len(G) for G in train_graphs]
     train_edge_counts = [G.number_of_edges() for G in train_graphs]
     val_node_counts = [len(G) for G in val_graphs]
     val_edge_counts = [G.number_of_edges() for G in val_graphs]
-    
+
     print(f"\nDataset Statistics:")
     print(f"  Training graphs: {len(train_graphs)}")
-    print(f"    Node range: {min(train_node_counts)}-{max(train_node_counts)} (avg: {np.mean(train_node_counts):.1f})")
-    print(f"    Edge range: {min(train_edge_counts)}-{max(train_edge_counts)} (avg: {np.mean(train_edge_counts):.1f})")
+    print(
+        f"    Node range: {min(train_node_counts)}-{max(train_node_counts)} (avg: {np.mean(train_node_counts):.1f})"
+    )
+    print(
+        f"    Edge range: {min(train_edge_counts)}-{max(train_edge_counts)} (avg: {np.mean(train_edge_counts):.1f})"
+    )
     print(f"  Validation graphs: {len(val_graphs)}")
-    print(f"    Node range: {min(val_node_counts)}-{max(val_node_counts)} (avg: {np.mean(val_node_counts):.1f})")
-    print(f"    Edge range: {min(val_edge_counts)}-{max(val_edge_counts)} (avg: {np.mean(val_edge_counts):.1f})")
-    
+    print(
+        f"    Node range: {min(val_node_counts)}-{max(val_node_counts)} (avg: {np.mean(val_node_counts):.1f})"
+    )
+    print(
+        f"    Edge range: {min(val_edge_counts)}-{max(val_edge_counts)} (avg: {np.mean(val_edge_counts):.1f})"
+    )
+
     wandb.config.update(
         {
             "dataset/train_graphs": len(train_graphs),
@@ -453,8 +474,11 @@ def main():
             "model/hidden_dim": args.hidden_dim,
             "model/num_layers": args.num_layers,
             "model/num_heads": args.num_heads if args.model_type == "gat" else None,
-            "model/use_layer_norm": args.use_layer_norm if args.model_type == "gat" else None,
-            "training/effective_batch_size": args.batch_size * args.gradient_accumulation_steps,
+            "model/use_layer_norm": (
+                args.use_layer_norm if args.model_type == "gat" else None
+            ),
+            "training/effective_batch_size": args.batch_size
+            * args.gradient_accumulation_steps,
             "training/gradient_accumulation_steps": args.gradient_accumulation_steps,
             "training/num_workers": args.num_workers,
             "training/use_amp": args.use_amp,
@@ -465,7 +489,7 @@ def main():
     # Loss and optimizer
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    
+
     # Mixed precision scaler
     scaler = None
     if args.use_amp and device.type == "cuda":
@@ -474,7 +498,7 @@ def main():
     elif args.use_amp and device.type != "cuda":
         print("Warning: Mixed precision only supported on CUDA, disabling...")
         args.use_amp = False
-    
+
     # Learning rate scheduler
     scheduler = None
     if args.lr_scheduler == "cosine":
@@ -516,7 +540,7 @@ def main():
         val_loss, val_mae = validate(model, val_loader, criterion, device)
         val_losses.append(val_loss)
         val_maes.append(val_mae)
-        
+
         # Update learning rate scheduler
         if scheduler is not None:
             if args.lr_scheduler == "cosine":

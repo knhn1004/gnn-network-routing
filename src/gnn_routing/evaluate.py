@@ -433,7 +433,7 @@ def main():
     # Load model
     checkpoint = torch.load(args.checkpoint, map_location=device)
     model_args = checkpoint.get("args", {})
-    
+
     # Determine model type from checkpoint or args
     model_type = model_args.get("model_type", "mpnn")
     num_heads = model_args.get("num_heads", 4)

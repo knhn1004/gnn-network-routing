@@ -19,7 +19,7 @@ def create_model(
     use_layer_norm: bool = True,
 ) -> Union[MPNN, GAT]:
     """Factory function to create a model by name.
-    
+
     Args:
         model_type: Type of model - 'mpnn' or 'gat'
         node_feature_dim: Dimension of node features
@@ -30,12 +30,12 @@ def create_model(
         dropout: Dropout rate
         num_heads: Number of attention heads (for GAT only)
         use_layer_norm: Whether to use layer normalization (for GAT only)
-        
+
     Returns:
         Model instance
     """
     import torch.nn as nn
-    
+
     if model_type.lower() == "mpnn":
         return MPNN(
             node_feature_dim=node_feature_dim,

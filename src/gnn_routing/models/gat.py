@@ -72,7 +72,7 @@ class GAT(nn.Module):
         # GAT layers with multi-head attention
         self.convs = nn.ModuleList()
         self.layer_norms = nn.ModuleList() if use_layer_norm else None
-        
+
         for i in range(num_layers):
             if i == 0:
                 # First layer: input is hidden_dim, output is hidden_dim
@@ -107,7 +107,7 @@ class GAT(nn.Module):
                         concat=True,
                     )
                 )
-            
+
             if use_layer_norm:
                 # Layer norm after each GAT layer
                 if i == num_layers - 1:
@@ -158,11 +158,11 @@ class GAT(nn.Module):
                 x_new = conv(x, edge_index, edge_attr=edge_attr_encoded)
             else:
                 x_new = conv(x, edge_index)
-            
+
             # Apply layer normalization if enabled
             if self.use_layer_norm and self.layer_norms is not None:
                 x_new = self.layer_norms[i](x_new)
-            
+
             x_new = F.relu(x_new)
             x_new = F.dropout(x_new, p=self.dropout, training=self.training)
 
@@ -195,4 +195,3 @@ class GAT(nn.Module):
         output = self.output_layer(combined)  # [output_dim]
 
         return output
-
